@@ -1,0 +1,21 @@
+{
+  "name": "piml",
+  "version": "1.0.0",
+  "description": "PIML (Plaintext Information Markup Language) encoder/decoder for Node.js",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "jest"
+  },
+  "keywords": [
+    "piml",
+    "markup",
+    "parser",
+    "encoder",
+    "decoder"
+  ],
+  "author": "fezcode",
+  "license": "MIT",
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
