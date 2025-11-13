@@ -220,4 +220,10 @@ class Piml {
 
 }
 
-module.exports = { Piml }
+const piml = new Piml()
+
+module.exports = {
+    Piml,
+    stringify: piml.stringify.bind(piml),
+    parse: piml.parse.bind(piml),
+}

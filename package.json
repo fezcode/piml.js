@@ -1,6 +1,6 @@
 {
   "name": "piml",
-  "version": "1.0.2",
+  "version": "1.0.4",
   "description": "PIML (Parenthesis Intended Markup Language) encoder/decoder for Node.js",
   "main": "piml.js",
   "scripts": {

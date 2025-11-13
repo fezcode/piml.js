@@ -1,12 +1,6 @@
-const { Piml } = require("./piml.js")
+const { stringify, parse } = require("./piml.js")
 
 describe("Piml", () => {
-    let piml
-
-    beforeEach(() => {
-        piml = new Piml()
-    })
-
     describe("stringify", () => {
         it("should stringify a simple object", () => {
             const obj = {
@@ -21,7 +15,7 @@ describe("Piml", () => {
 (is_production) false
 (version) 1.2
 `
-            expect(piml.stringify(obj).trim()).toBe(expected.trim())
+            expect(stringify(obj).trim()).toBe(expected.trim())
         })
 
         it("should handle null and undefined values", () => {
@@ -37,7 +31,7 @@ describe("Piml", () => {
 (aliases) nil
 (site_name) Test
 `
-            expect(piml.stringify(obj).trim()).toBe(expected.trim())
+            expect(stringify(obj).trim()).toBe(expected.trim())
         })
 
         it("should stringify a complex object", () => {
@@ -72,7 +66,7 @@ describe("Piml", () => {
   > logging
   > metrics
 `
-            expect(piml.stringify(obj).trim()).toBe(expected.trim())
+            expect(stringify(obj).trim()).toBe(expected.trim())
         })
 
         it("should stringify a multiline string", () => {
@@ -84,7 +78,7 @@ describe("Piml", () => {
   Hello
   World
 `;
-            expect(piml.stringify(obj).trim()).toBe(expected.trim());
+            expect(stringify(obj).trim()).toBe(expected.trim());
         });
     })
 
@@ -102,7 +96,7 @@ describe("Piml", () => {
                 is_production: false,
                 version: 1.2,
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should handle nil values", () => {
@@ -118,7 +112,7 @@ describe("Piml", () => {
                 aliases: null,
                 site_name: "Test",
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should be semantically equivalent to JSON", () => {
@@ -180,7 +174,7 @@ describe("Piml", () => {
   "related_ids": []
 }
 `
-            const pimlObject = piml.parse(pimlData)
+            const pimlObject = parse(pimlData)
             const jsonObject = JSON.parse(jsonData)
 
             // Normalize pimlObject to match jsonObject
@@ -210,7 +204,7 @@ describe("Piml", () => {
                     "X-Test": true,
                 },
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should handle deeply nested objects", () => {
@@ -229,7 +223,7 @@ describe("Piml", () => {
                     },
                 },
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should handle comments", () => {
@@ -248,7 +242,7 @@ describe("Piml", () => {
                 port: 5432,
                 description: "This is a multi-line string. # Comments are allowed here\n# And on their own line.\nEven with weird indentation.",
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should empty lines in multiline comments", () => {
@@ -267,7 +261,7 @@ describe("Piml", () => {
                 port: 5432,
                 description: "First line.\nThird line.",
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should handle keys with spaces", () => {
@@ -279,7 +273,7 @@ describe("Piml", () => {
                 "first name": "John",
                 "last name": "Doe",
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
 
         it("should parse a complex PIML string", () => {
@@ -314,7 +308,7 @@ describe("Piml", () => {
                 ],
                 features: ["auth", "logging", "metrics"],
             }
-            expect(piml.parse(pimlString)).toEqual(expected)
+            expect(parse(pimlString)).toEqual(expected)
         })
     })
 })
