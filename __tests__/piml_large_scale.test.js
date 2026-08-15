@@ -6,15 +6,15 @@ describe("Piml Large Scale & Performance Tests", () => {
     function generateLargeObject(size = 1000) {
         const result = {
             id: "root",
-            createdAt: new Date(),
+            createdAt: "2026-08-15T12:00:00.000Z",
             items: []
         };
-        
+
         for (let i = 0; i < size; i++) {
             result.items.push({
                 index: i,
                 active: i % 2 === 0,
-                score: Math.random() * 1000,
+                score: (i * 997 % 100000) / 100,
                 name: `Item ${i}`,
                 description: `This is item number ${i}.\nIt has some multiline text.\n# And a fake comment line.`,
                 tags: ["tag1", "tag2", "complex tag with spaces"],

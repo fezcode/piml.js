@@ -1,365 +1,457 @@
+// piml.js — encoder/decoder for PIML (Parenthesis Intended Markup Language)
+// Implements PIML spec v1.2.0: https://github.com/fezcode/piml
+
+class PimlSyntaxError extends Error {
+    constructor(message, line) {
+        super(line ? `${message} (line ${line})` : message);
+        this.name = "PimlSyntaxError";
+        this.line = line;
+    }
+}
+
+// Type inference patterns, per spec v1.2.0.
+const INT_RE = /^-?(0|[1-9][0-9]*)$/;
+const FLOAT_RE = /^-?(0|[1-9][0-9]*)\.[0-9]+$/;
+
+// ---------------------------------------------------------------------------
+// Scanning
+// ---------------------------------------------------------------------------
+
+// scan splits the input into significant lines. Tabs in indentation are
+// rejected; comment lines (first non-space char is '#') are dropped; a
+// trailing '\r' is stripped from every line. Blank lines are kept because
+// multi-line string blocks preserve them.
+function scan(input) {
+    const rawLines = String(input).split("\n");
+    const lines = [];
+    for (let i = 0; i < rawLines.length; i++) {
+        const num = i + 1;
+        let l = rawLines[i];
+        if (l.endsWith("\r")) l = l.slice(0, -1);
+        if (l.trim() === "") {
+            lines.push({ indent: 0, text: "", blank: true, num });
+            continue;
+        }
+        let indent = 0;
+        while (indent < l.length) {
+            if (l[indent] === " ") {
+                indent++;
+                continue;
+            }
+            if (l[indent] === "\t") {
+                throw new PimlSyntaxError("tabs are not allowed in indentation", num);
+            }
+            break;
+        }
+        const text = l.slice(indent);
+        if (text[0] === "#") continue; // full-line comment, at any indentation
+        lines.push({ indent, text, blank: false, num });
+    }
+    return lines;
+}
+
+// parseScalar interprets everything after "(key)" or ">" on a line:
+// quoting, inline comments, and the \# escape.
+function parseScalar(rest, num) {
+    let s = rest.trim();
+    if (s === "") return { text: "", quoted: false, empty: true };
+
+    if (s[0] === '"') {
+        // A value is quoted only when the quotes cleanly wrap it: the LAST
+        // '"' on the line is followed by nothing but whitespace or an
+        // inline comment. Anything else falls through and the value is
+        // ordinary literal text, quotes included.
+        const last = s.lastIndexOf('"');
+        if (last > 0) {
+            const tail = s.slice(last + 1);
+            const trimmed = tail.trim();
+            if (trimmed === "" || (trimmed.startsWith("#") && tail.length > trimmed.length)) {
+                return { text: s.slice(1, last), quoted: true, empty: false };
+            }
+        }
+    }
+
+    if (s[0] === "#") return { text: "", quoted: false, empty: true };
+
+    // Inline comment: '#' preceded by whitespace. '\#' never matches
+    // because its preceding character is a backslash.
+    for (let i = 1; i < s.length; i++) {
+        if (s[i] === "#" && (s[i - 1] === " " || s[i - 1] === "\t")) {
+            s = s.slice(0, i).replace(/[ \t]+$/, "");
+            break;
+        }
+    }
+    s = s.split("\\#").join("#");
+    if (s === "") return { text: "", quoted: false, empty: true };
+    return { text: s, quoted: false, empty: false };
+}
+
+// scalarValue applies the spec's schemaless type inference.
+function scalarValue(scalar) {
+    if (scalar.quoted) return scalar.text;
+    const s = scalar.text;
+    if (s === "nil") return null;
+    if (s === "true") return true;
+    if (s === "false") return false;
+    if (INT_RE.test(s) || FLOAT_RE.test(s)) return Number(s);
+    return s;
+}
+
+// unescapeContentLine removes the positional escapes from a multi-line
+// content line: \# anywhere a line starts, and \( / \> on the first line.
+function unescapeContentLine(content, firstLine) {
+    let i = 0;
+    while (i < content.length && content[i] === " ") i++;
+    const rest = content.slice(i);
+    if (rest.startsWith("\\#")) return content.slice(0, i) + rest.slice(1);
+    if (firstLine && (rest.startsWith("\\(") || rest.startsWith("\\>"))) {
+        return content.slice(0, i) + rest.slice(1);
+    }
+    return content;
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+class Parser {
+    constructor(lines) {
+        this.lines = lines;
+        this.pos = 0;
+    }
+
+    peek() {
+        return this.pos < this.lines.length ? this.lines[this.pos] : null;
+    }
+
+    consume() {
+        this.pos++;
+    }
+
+    nextContentLine(from = this.pos) {
+        for (let i = from; i < this.lines.length; i++) {
+            if (!this.lines[i].blank) return this.lines[i];
+        }
+        return null;
+    }
+
+    // parseObject reads key lines at exactly `indent`.
+    parseObject(indent) {
+        const obj = {};
+        const seen = new Set();
+
+        for (;;) {
+            const line = this.peek();
+            if (line === null) return obj;
+            if (line.blank) {
+                this.consume();
+                continue;
+            }
+            if (line.indent < indent) return obj;
+            if (line.indent > indent) {
+                throw new PimlSyntaxError(
+                    `unexpected indentation, expected ${indent} spaces, got ${line.indent}`, line.num);
+            }
+
+            if (line.text[0] !== "(") {
+                throw new PimlSyntaxError(`expected (key), got ${JSON.stringify(line.text)}`, line.num);
+            }
+            const closeParen = line.text.indexOf(")");
+            if (closeParen === -1) {
+                throw new PimlSyntaxError("invalid key format, missing ')'", line.num);
+            }
+            const key = line.text.slice(1, closeParen);
+            if (key === "") throw new PimlSyntaxError("empty key", line.num);
+            if (key.includes("(")) {
+                throw new PimlSyntaxError(`key ${JSON.stringify(key)} contains '('`, line.num);
+            }
+            if (seen.has(key)) {
+                throw new PimlSyntaxError(`duplicate key ${JSON.stringify(key)}`, line.num);
+            }
+            seen.add(key);
+
+            const val = parseScalar(line.text.slice(closeParen + 1), line.num);
+            this.consume();
+
+            if (!val.empty) {
+                const next = this.nextContentLine();
+                if (next !== null && next.indent > indent) {
+                    throw new PimlSyntaxError(
+                        `key ${JSON.stringify(key)} has both a value and an indented block`, next.num);
+                }
+                obj[key] = scalarValue(val);
+            } else {
+                obj[key] = this.parseBlock(indent);
+            }
+        }
+    }
+
+    // parseBlock handles a bare key (or bare '>'): the first content line
+    // of the following block decides its type.
+    parseBlock(keyIndent) {
+        const next = this.nextContentLine();
+        if (next === null || next.indent <= keyIndent) return null;
+        if (next.indent !== keyIndent + 2) {
+            throw new PimlSyntaxError(
+                `expected ${keyIndent + 2} spaces of indentation, got ${next.indent}`, next.num);
+        }
+        if (next.text.startsWith("\\(") || next.text.startsWith("\\>")) {
+            return this.parseMultiline(keyIndent);
+        }
+        if (next.text[0] === "(") return this.parseObject(keyIndent + 2);
+        if (next.text[0] === ">") return this.parseArray(keyIndent + 2);
+        return this.parseMultiline(keyIndent);
+    }
+
+    // parseArray reads '>' item lines at exactly `indent`.
+    parseArray(indent) {
+        const arr = [];
+
+        for (;;) {
+            const line = this.peek();
+            if (line === null) return arr;
+            if (line.blank) {
+                this.consume();
+                continue;
+            }
+            if (line.indent < indent) return arr;
+            if (line.indent > indent) {
+                throw new PimlSyntaxError("unexpected indentation in array", line.num);
+            }
+            if (line.text[0] !== ">") {
+                throw new PimlSyntaxError(`expected array item '>', got ${JSON.stringify(line.text)}`, line.num);
+            }
+
+            const val = parseScalar(line.text.slice(1), line.num);
+
+            if (!val.empty) {
+                // "> (label)" followed by a deeper block is an object item;
+                // the label is metadata and is ignored.
+                const isLabel = !val.quoted && val.text.length > 2 &&
+                    val.text[0] === "(" && val.text.indexOf(")") === val.text.length - 1;
+                if (isLabel) {
+                    const next = this.nextContentLine(this.pos + 1);
+                    if (next !== null && next.indent > indent) {
+                        this.consume();
+                        arr.push(this.parseObject(indent + 2));
+                        continue;
+                    }
+                }
+                this.consume();
+                const next = this.nextContentLine();
+                if (next !== null && next.indent > indent) {
+                    throw new PimlSyntaxError("array item has both a value and an indented block", next.num);
+                }
+                arr.push(scalarValue(val));
+            } else {
+                this.consume();
+                arr.push(this.parseBlock(indent));
+            }
+        }
+    }
+
+    // parseMultiline reads a multi-line string block owned by a key or item
+    // at keyIndent. Base indent is keyIndent + 2; deeper indentation is
+    // content; interior blanks are preserved; the end of the value is
+    // trimmed of trailing whitespace.
+    parseMultiline(keyIndent) {
+        const base = keyIndent + 2;
+        const parts = [];
+        let pendingBlanks = 0;
+        let started = false;
+
+        for (;;) {
+            const line = this.peek();
+            if (line === null) break;
+            if (line.blank) {
+                this.consume();
+                if (started) pendingBlanks++;
+                continue;
+            }
+            if (line.indent <= keyIndent) break;
+            if (line.indent < base) {
+                throw new PimlSyntaxError("multi-line string content indented less than its base", line.num);
+            }
+            this.consume();
+
+            let content = " ".repeat(line.indent - base) + line.text;
+            content = unescapeContentLine(content, !started);
+
+            for (; pendingBlanks > 0; pendingBlanks--) parts.push("");
+            parts.push(content);
+            started = true;
+        }
+
+        return parts.join("\n").replace(/[ \t]+$/, "");
+    }
+}
+
+function parse(pimlString) {
+    const p = new Parser(scan(pimlString));
+    // The document root is an implicit object at indentation level 0.
+    return p.parseObject(0);
+}
+
+// ---------------------------------------------------------------------------
+// Stringifying
+// ---------------------------------------------------------------------------
+
+function indentOf(level) {
+    return level <= 0 ? "" : "  ".repeat(level);
+}
+
+// needsQuoting reports whether a single-line string value must be quoted
+// to parse back as the same string.
+function needsQuoting(s) {
+    if (s === "") return true;
+    if (s !== s.trim()) return true;
+    if (s === "nil" || s === "true" || s === "false") return true;
+    if (INT_RE.test(s) || FLOAT_RE.test(s)) return true;
+    if (s[0] === '"' || s[0] === "#") return true;
+    if (s.includes("\\#")) return true;
+    for (let i = 1; i < s.length; i++) {
+        if (s[i] === "#" && (s[i - 1] === " " || s[i - 1] === "\t")) return true;
+    }
+    return false;
+}
+
+// escapeContentLine applies the positional escapes a multi-line content
+// line needs: a leading '#' always, a leading '(' or '>' on the first line.
+function escapeContentLine(line, firstLine) {
+    let i = 0;
+    while (i < line.length && line[i] === " ") i++;
+    const rest = line.slice(i);
+    if (rest.startsWith("#")) return line.slice(0, i) + "\\" + rest;
+    if (firstLine && (rest.startsWith("(") || rest.startsWith(">"))) {
+        return line.slice(0, i) + "\\" + rest;
+    }
+    return line;
+}
+
+function isNilOrEmpty(value) {
+    if (value === null || value === undefined) return true;
+    if (Array.isArray(value)) return value.length === 0;
+    if (value instanceof Date) return false;
+    if (typeof value === "object") return Object.keys(value).length === 0;
+    return false;
+}
+
+function encodeString(s, indent, inArray) {
+    const indentStr = indentOf(indent);
+
+    if (s.includes("\n")) {
+        // --- Multi-line string block ---
+        let result = inArray ? `${indentStr}>\n` : "\n";
+        const lineIndentStr = indentOf(indent + 1);
+        const lines = s.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].trim() === "") {
+                result += "\n";
+                continue;
+            }
+            result += `${lineIndentStr}${escapeContentLine(lines[i], i === 0)}\n`;
+        }
+        return result;
+    }
+
+    // --- Single-line string ---
+    const out = needsQuoting(s) ? `"${s}"` : s;
+    return inArray ? `${indentStr}> ${out}\n` : ` ${out}\n`;
+}
+
+function encodeValue(value, indent, inArray) {
+    const indentStr = indentOf(indent);
+
+    if (isNilOrEmpty(value)) {
+        return inArray ? `${indentStr}> nil\n` : " nil\n";
+    }
+
+    if (value instanceof Date) {
+        const s = value.toISOString();
+        return inArray ? `${indentStr}> ${s}\n` : ` ${s}\n`;
+    }
+
+    if (Array.isArray(value)) {
+        // A nested list inside an array: bare '>' with items one level deeper.
+        let result = inArray ? `${indentStr}>\n` : "\n";
+        for (const item of value) {
+            result += encodeValue(item, indent + 1, true);
+        }
+        return result;
+    }
+
+    const type = typeof value;
+
+    if (type === "object") {
+        let result;
+        if (inArray) {
+            // The label is readability metadata; parsers ignore it.
+            result = `${indentStr}> (item)\n`;
+        } else {
+            result = indent > -1 ? "\n" : "";
+        }
+        result += encodeFields(value, indent);
+        return result;
+    }
+
+    if (type === "string") {
+        return encodeString(value, indent, inArray);
+    }
+
+    if (type === "number") {
+        if (!Number.isFinite(value)) {
+            throw new Error(`piml: cannot stringify non-finite number: ${value}`);
+        }
+        const s = String(value);
+        return inArray ? `${indentStr}> ${s}\n` : ` ${s}\n`;
+    }
+
+    if (type === "boolean") {
+        const s = value ? "true" : "false";
+        return inArray ? `${indentStr}> ${s}\n` : ` ${s}\n`;
+    }
+
+    throw new Error(`piml: unsupported type: ${type}`);
+}
+
+// encodeFields writes the keys of an object; `indent` is the level of the
+// object's own key line, fields go one level deeper.
+function encodeFields(obj, indent) {
+    const fieldIndent = indent + 1;
+    const indentStr = indentOf(fieldIndent);
+    let result = "";
+    for (const key of Object.keys(obj)) {
+        if (key === "" || key.includes("(") || key.includes(")")) {
+            throw new Error(`piml: key ${JSON.stringify(key)} may not be empty or contain parentheses`);
+        }
+        result += `${indentStr}(${key})`;
+        result += encodeValue(obj[key], fieldIndent, false);
+    }
+    return result;
+}
+
+function stringify(obj) {
+    return encodeValue(obj, -1, false);
+}
+
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
+
+// Piml class kept for backwards compatibility with the pre-1.2.0 API.
 class Piml {
-    constructor() {
-        this.indentLevel = -1
+    parse(pimlString) {
+        return parse(pimlString);
     }
 
     stringify(obj) {
-        return this.encodeValue(obj, -1, false)
-    }
-
-    encodeValue(value, indent, inArray) {
-        if (value === null || value === undefined) {
-            if (inArray) {
-                return null // Should filter these out in encodeSlice if possible, or handle nicely
-            }
-            return " nil\n"
-        }
-
-        let indentStr = ""
-        if (indent > 0) {
-            indentStr = "  ".repeat(indent)
-        }
-
-        const type = typeof value
-        if (type === "object") {
-            if (Array.isArray(value)) {
-                if (value.length === 0) {
-                    if (inArray) {
-                        return `${indentStr}> nil\n` // Spec doesn't strictly define empty list item, but nil works
-                    }
-                    return " nil\n"
-                }
-                let result = ""
-                if (!inArray) {
-                    result += "\n"
-                }
-                result += this.encodeSlice(value, indent + 1)
-                return result
-            }
-
-            if (value instanceof Date) {
-                const s = value.toISOString()
-                if (inArray) {
-                    return `${indentStr}> ${s}\n`
-                }
-                return ` ${s}\n`
-            }
-
-            const keys = Object.keys(value)
-            if (keys.length === 0) {
-                 if (inArray) {
-                    return `${indentStr}> nil\n`
-                }
-                return " nil\n"
-            }
-
-            if (inArray) {
-                let itemName = "item"
-                let result = `${indentStr}> (${itemName})\n`
-                result += this.encodeStruct(value, indent)
-                return result
-            } else {
-                let result = ""
-                if (indent > -1) {
-                    result += "\n"
-                }
-                result += this.encodeStruct(value, indent)
-                return result
-            }
-        } else if (
-            type === "string" ||
-            type === "number" ||
-            type === "boolean"
-        ) {
-            let s = String(value)
-            if (type === "string") {
-                if (s.includes('\n')) {
-                    const lines = s.split('\n');
-                    let result = '\n';
-                    const multiLineIndentStr = "  ".repeat(indent + 1);
-                    for (const line of lines) {
-                        let lineToPush = line;
-                        if (lineToPush.trim().startsWith('#')) {
-                            lineToPush = `\\${lineToPush}`;
-                        }
-                        result += `${multiLineIndentStr}${lineToPush}\n`;
-                    }
-                    return result;
-                }
-                // Removed quoting logic to comply with Spec and Go implementation
-            }
-            
-            if (inArray) {
-                return `${indentStr}> ${s}\n`
-            }
-            return ` ${s}\n`
-        } else {
-            throw new Error(`Unsupported type: ${type}`)
-        }
-    }
-
-    encodeStruct(obj, indent) {
-        let result = ""
-        const fieldIndent = indent + 1
-        let indentStr = ""
-        if (fieldIndent > 0) {
-            indentStr = "  ".repeat(fieldIndent)
-        }
-
-        for (const key in obj) {
-            if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                const value = obj[key]
-                result += `${indentStr}(${key})`
-                result += this.encodeValue(value, fieldIndent, false)
-            }
-        }
-        return result
-    }
-
-    encodeSlice(arr, indent) {
-        if (arr.length === 0) {
-            return ""
-        }
-
-        let result = ""
-        for (const item of arr) {
-            // Check for null/undefined items and handle them as 'nil' explicitly if needed
-            // encodeValue handles them.
-            const encoded = this.encodeValue(item, indent, true);
-            if (encoded !== null) {
-                 result += encoded;
-            } else {
-                // If encodeValue returned null (shouldn't happen for inArray=true with current logic except undefined)
-                let indentStr = "  ".repeat(indent)
-                result += `${indentStr}> nil\n`
-            }
-        }
-        return result
-    }
-
-    parse(pimlString) {
-        const lines = pimlString.split('\n');
-        const root = {};
-        const stack = [{ indent: -1, obj: root }];
-
-        let i = 0;
-        while (i < lines.length) {
-            let line = lines[i];
-            // Skip comment lines
-            if (line.trim().startsWith('#')) {
-                i++;
-                continue;
-            }
-            
-            // Check for escaped hash at start of line (unlikely in root, but possible in values)
-            // But here we are parsing structure.
-            
-            const trimmedLine = line.trim();
-
-            if (trimmedLine === '') {
-                i++;
-                continue;
-            }
-
-            const indent = line.length - line.trimStart().length;
-
-            while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
-                stack.pop();
-            }
-
-            const parent = stack[stack.length - 1].obj;
-
-            if (trimmedLine.startsWith('>')) {
-                const valueStr = trimmedLine.substring(1).trim();
-                
-                // Logic to distinguish object item vs string item
-                // > (item)
-                //   (key) val
-                
-                // Check if the current line looks like an object start > (key)
-                let looksLikeObjectStart = false;
-                if (valueStr.startsWith('(') && valueStr.endsWith(')')) {
-                     // It is just > (key), no value on this line.
-                     // It *could* be a string "(key)", OR the start of an object.
-                     // We check if the next line is indented relative to THIS line.
-                     // The indent of this line is `indent`.
-                     // The children should be `> indent`.
-                     
-                     let j = i + 1;
-                     while (j < lines.length) {
-                         const nextLine = lines[j];
-                         if (nextLine.trim() === '' || nextLine.trim().startsWith('#')) {
-                             j++;
-                             continue;
-                         }
-                         const nextIndent = nextLine.length - nextLine.trimStart().length;
-                         if (nextIndent > indent) {
-                             looksLikeObjectStart = true;
-                         }
-                         break;
-                     }
-                }
-                
-                // Also check > (item) ... with no indentation check if strictly following spec convention?
-                // Spec: "The (item_key) is considered metadata... A parser must ignore this key and simply interpret the indented block as an object"
-                
-                if (looksLikeObjectStart) {
-                     const newObj = {};
-                     if (!Array.isArray(parent)) {
-                        // Error or ignore?
-                        i++; continue; 
-                    }
-                    parent.push(newObj);
-                    stack.push({ indent: indent, obj: newObj });
-                    i++;
-                } else {
-                     if (!Array.isArray(parent)) {
-                        i++; continue;
-                    }
-                    // It's a primitive value (string, number, nil, etc.)
-                    parent.push(this.parseValue(valueStr));
-                    i++;
-                }
-
-            } else if (trimmedLine.startsWith('(')) {
-                const keyMatch = trimmedLine.match(/^\((.*?)\)(.*)/);
-                if (!keyMatch) {
-                    i++;
-                    continue;
-                }
-                const key = keyMatch[1];
-                const valueStr = keyMatch[2].trim();
-
-                if (valueStr === '') {
-                    // Check if it's a nested object/array or multiline string or empty string
-                    let j = i + 1;
-                    let nextLine = '';
-                    let nextIndent = 0;
-                    
-                    let lookaheadIndex = j;
-                    while(lookaheadIndex < lines.length) {
-                         const l = lines[lookaheadIndex];
-                         if (l.trim() !== '' && !l.trim().startsWith('#')) {
-                             nextLine = l;
-                             nextIndent = l.length - l.trimStart().length;
-                             break;
-                         }
-                         lookaheadIndex++;
-                    }
-                    
-                    if (lookaheadIndex === lines.length || nextIndent <= indent) {
-                         // No indented children -> Empty string (or null? Spec says nil for null. Empty string is "")
-                         // But wait, if I have `(key)` and nothing else, it's effectively empty string.
-                         parent[key] = '';
-                         i++;
-                         continue;
-                    }
-
-                    if (nextIndent > indent) {
-                        if (nextLine.trim().startsWith('>')) {
-                            // Array
-                            const newArr = [];
-                            parent[key] = newArr;
-                            stack.push({ indent: indent, obj: newArr });
-                            i++; 
-                        } else if (nextLine.trim().startsWith('(')) {
-                            // Object
-                            const newObj = {};
-                            parent[key] = newObj;
-                            stack.push({ indent: indent, obj: newObj });
-                            i++;
-                        } else {
-                            // Multiline string
-                            const multiLineParts = [];
-                            j = i + 1;
-                            while (j < lines.length) {
-                                let currentLine = lines[j];
-                                // Handle blank lines in multiline string
-                                if (currentLine.trim() === '') {
-                                     // Check if we passed the block
-                                     // Peek next non-blank line
-                                     // This is expensive/complex. 
-                                     // Simple heuristic: If it's blank, include it as newline. 
-                                     // We trim trailing blank lines later if needed.
-                                     multiLineParts.push(''); // Add empty line
-                                     j++;
-                                     continue;
-                                }
-                                
-                                const currentIndent = currentLine.length - currentLine.trimStart().length;
-                                if (currentIndent <= indent) break;
-
-                                let lineToPush = currentLine.substring(indent + 2); // Assume 2-space offset from parent key
-                                // Safe guard if indent is different
-                                if (lineToPush === undefined) lineToPush = currentLine.trim();
-
-                                if (lineToPush.trim().startsWith('\\#')) {
-                                    // Handle escaping of # at start of line
-                                     const trimIdx = lineToPush.indexOf('\\#');
-                                     if (trimIdx !== -1 && lineToPush.substring(0, trimIdx).trim() === '') {
-                                         // only replace if it's the start of content
-                                         lineToPush = lineToPush.replace('\\#', '#');
-                                     }
-                                }
-                                multiLineParts.push(lineToPush);
-                                j++;
-                            }
-                            // Join
-                            // Trim trailing empty lines from multiLineParts
-                            while (multiLineParts.length > 0 && multiLineParts[multiLineParts.length - 1] === '') {
-                                multiLineParts.pop();
-                            }
-                            let result = multiLineParts.join('\n');
-                            // Trim trailing newlines from the string itself? Spec says "preserved". 
-                            // But usually trailing newline of the block is implicit.
-                            parent[key] = result;
-                            i = j;
-                        }
-                    } 
-                } else {
-                    parent[key] = this.parseValue(valueStr);
-                    i++;
-                }
-            } else {
-                // Unknown line type
-                i++;
-            }
-        }
-
-        return root;
-    }
-
-    parseValue(valueStr) {
-        if (valueStr === 'nil') {
-            return null;
-        }
-        // Support legacy/robustness
-        if (valueStr === '{}') return {}; // Spec violation but useful for reading old files? Or maybe just return null? Let's keep for now.
-        if (valueStr === '[]') return [];
-
-        if (!isNaN(valueStr) && valueStr.trim() !== '') {
-            return Number(valueStr);
-        }
-        if (valueStr === 'true') return true;
-        if (valueStr === 'false') return false;
-        
-        // Date parsing
-        const isoDateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
-        if (isoDateRegex.test(valueStr)) {
-            const date = new Date(valueStr);
-            if (!isNaN(date.getTime())) {
-                return date;
-            }
-        }
-        
-        return valueStr;
+        return stringify(obj);
     }
 }
-
-const piml = new Piml()
 
 module.exports = {
     Piml,
-    stringify: piml.stringify.bind(piml),
-    parse: piml.parse.bind(piml),
-}
+    PimlSyntaxError,
+    stringify,
+    parse,
+};

@@ -2,41 +2,59 @@
 
 `piml.js` is a JavaScript library that provides functionality to parse and stringify data to and from the PIML (Parenthesis Intended Markup Language) format. PIML is a human-readable, indentation-based data serialization format designed for configuration files and simple data structures.
 
+Implements **PIML spec v1.2.0** — see the [spec repository](https://github.com/fezcode/piml). Conformance is verified against the shared compliance suite.
+
 ## Features
 
 -   **Intuitive Syntax:** Easy-to-read key-value pairs, supporting nested structures.
--   **Primitive Types:** Supports strings, numbers, and booleans.
--   **Complex Types:** Handles objects and arrays.
--   **Nil Handling:** Explicitly represents `null`.
--   **Multi-line Strings:** Supports multi-line string values with indentation.
--   **Comments:** Allows single-line comments using `#`.
--   **Escaping:** Allows escaping of the `#` character in multi-line strings.
--   **Date Support:** Stringifies and parses `Date` objects using ISO 8601 format.
+-   **Type Inference:** Unquoted values become numbers, booleans, or `null` per the spec's rules; everything else is a string.
+-   **Quoted Strings:** `(zip) "08080"` forces a string where inference would produce another type; `stringify` quotes automatically when needed.
+-   **Complex Types:** Handles objects, arrays, nested lists, and multi-line strings inside arrays.
+-   **Nil Handling:** `nil` (and bare keys) represent `null`, empty arrays, and empty objects.
+-   **Multi-line Strings:** Base indent is key + 2; deeper indentation is preserved; the end of the value is trimmed.
+-   **Comments:** Full-line comments (`#` at line start, any indentation) and inline comments (whitespace + `#`). A `#` glued to text is literal; escape with `\#` where needed.
+-   **Strict Indentation:** Exactly 2 spaces per level; tabs, skipped levels, and duplicate keys throw `PimlSyntaxError`.
+-   **Date Stringifying:** `Date` objects stringify as ISO 8601 strings. Per the spec, `parse` returns them as strings — dates are a convention, not a type.
 
 ## PIML Format Overview
 
-PIML uses a simple key-value structure. Keys are enclosed in parentheses `()`, and values follow. Indentation defines nesting.
+PIML uses a simple key-value structure. Keys are enclosed in parentheses `()`, and values follow. Indentation defines nesting: exactly 2 spaces per level.
 
 ### Comments
 
-PIML supports single-line comments starting with `#`.
-
 ```piml
-# This is a comment
-(key) value
+# This is a full-line comment
+(host) localhost # inline comment; the value is "localhost"
+(url) https://x.com/a#b # a glued hash is literal
+(note) five \# six # escaped: the value is "five # six"
 ```
 
-**Note:** Inline comments are not supported. A `#` character in the middle of a line is treated as part of the value.
+### Quoting
 
-### Escaping
+```piml
+(port) 8080          # number 8080
+(zip)  "08080"       # string "08080"
+(word) "true"        # string "true"
+```
 
-In multi-line strings, you can escape a `#` character at the beginning of a line with a backslash (`\`) to prevent it from being treated as a comment.
+### Multi-line Strings
 
 ```piml
 (description)
   This is a multi-line string.
-  \# This is not a comment.
+  \# An escaped hash line; unescaped it would be a dropped comment.
+
+  Interior blank lines are preserved; trailing whitespace is trimmed.
 ```
+
+### Breaking changes in v1.2.0
+
+-   Inline comments are now stripped from values.
+-   Duplicate keys, tabs, and non-2-space indentation now throw.
+-   A bare `(key)` parses as `null` instead of `""`.
+-   ISO date strings are no longer auto-converted to `Date` objects.
+-   The out-of-spec `{}` / `[]` literals are no longer recognized.
+-   `"123"` now round-trips as a string (previously collapsed to a number).
 
 ## Installation
 

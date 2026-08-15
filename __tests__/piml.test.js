@@ -177,22 +177,14 @@ describe("Piml", () => {
             const pimlObject = parse(pimlData)
             const jsonObject = JSON.parse(jsonData)
 
-            // Normalize pimlObject to match jsonObject expectations
+            // Normalize the spec's nil ambiguity: PIML nil maps to null,
+            // while the JSON fixture uses {} and [].
             if (pimlObject.metadata === null) {
                 pimlObject.metadata = {}
             }
             if (pimlObject.related_ids === null) {
                 pimlObject.related_ids = []
             }
-            if (pimlObject.revisions) {
-                pimlObject.revisions = pimlObject.revisions.map(r => r.item || r);
-            }
-            
-            // Adjust JSON object to match PIML's native Date objects
-            jsonObject.revisions.forEach(r => {
-                r.timestamp = new Date(r.timestamp);
-            });
-
 
             expect(pimlObject).toEqual(jsonObject)
         })
@@ -238,14 +230,14 @@ describe("Piml", () => {
 # Another comment
 (port) 5432
 (description)
-  This is a multi-line string. # Comments are allowed here
-  # And on their own line.
-  Even with weird indentation.
+  This is a multi-line string. # hashes on content lines are literal
+  # Comment lines are still dropped inside blocks.
+  Even more text.
 `
             const expected = {
-                host: "localhost # This is an inline comment",
+                host: "localhost",
                 port: 5432,
-                description: "This is a multi-line string. # Comments are allowed here\n# And on their own line.\nEven with weird indentation.",
+                description: "This is a multi-line string. # hashes on content lines are literal\nEven more text.",
             }
             expect(parse(pimlString)).toEqual(expected)
         })
@@ -258,11 +250,11 @@ describe("Piml", () => {
 (port) 5432
 (description)
   First line.
-  
+
   Third line.
 `
             const expected = {
-                host: "localhost # This is an inline comment",
+                host: "localhost",
                 port: 5432,
                 description: "First line.\n\nThird line.",
             }

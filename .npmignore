@@ -1,0 +1,5 @@
+__tests__/
+.idea/
+.gitignore
+changes.txt
+changes_2.txt
